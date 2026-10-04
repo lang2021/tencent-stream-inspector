@@ -1,11 +1,5 @@
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
-const vm = require("node:vm");
-
-const source = fs.readFileSync(path.join(__dirname, "..", "background.js"), "utf8");
 const storage = new Map();
-let onRuntimeMessage = null;
 
 const context = {
   console,
@@ -25,7 +19,7 @@ const context = {
       getURL: (name) => name,
       async getContexts() { return []; },
       async sendMessage() { return { ok: true }; },
-      onMessage: { addListener(listener) { onRuntimeMessage = listener; } }
+      onMessage: { addListener() {} }
     },
     downloads: {
       async download() { return 1; },
@@ -43,19 +37,14 @@ const context = {
   }
 };
 
-vm.runInNewContext(source, context, { filename: "background.js" });
-
-function sendToBackground(message) {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("background response timeout")), 1_000);
-    onRuntimeMessage(message, {}, (response) => {
-      clearTimeout(timeout);
-      resolve(response);
-    });
-  });
-}
-
 (async () => {
+  globalThis.chrome = context.chrome;
+  const { createTabRecordingModule } = await import("../features/tab-recording/background.js");
+  const module = createTabRecordingModule({ isMediaCaptureBusy: async () => false });
+  async function sendToBackground(message) {
+    return module.handleMessage(message);
+  }
+
   const value = { fileName: "recording.webm", status: "recording", bytes: 123 };
   assert.equal((await sendToBackground({
     target: "background",

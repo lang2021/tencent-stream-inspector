@@ -1,12 +1,7 @@
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
 const test = require("node:test");
-const vm = require("node:vm");
 
-const source = fs.readFileSync(path.join(__dirname, "..", "background.js"), "utf8");
-
-function makeHarness() {
+async function makeHarness() {
   const selectedMp4MimeType = "video/mp4;codecs=avc1.640028,mp4a.40.2";
   const calls = [];
   const scheduled = [];
@@ -94,15 +89,6 @@ function makeHarness() {
   };
 
   const context = {
-    console,
-    TextEncoder,
-    URL,
-    setTimeout(callback, delay) {
-      const item = { callback, delay };
-      scheduled.push(item);
-      return item;
-    },
-    clearTimeout() {},
     chrome: {
       runtime,
       tabs: {
@@ -115,7 +101,7 @@ function makeHarness() {
           calls.push({ type: "script", details });
           if (details.files) {
             if (injectionShouldFail) throw new Error("注入失败");
-            if (details.files.includes("keyboard-lock.js")) keyboardLockInjected = true;
+            if (details.files.some((file) => file.endsWith("keyboard-lock.js"))) keyboardLockInjected = true;
             else lockInjected = true;
             return [];
           }
@@ -158,7 +144,10 @@ function makeHarness() {
       }
     }
   };
-  vm.runInNewContext(source, context, { filename: "background.js" });
+  globalThis.chrome = context.chrome;
+  const { createTabRecordingModule } = await import("../features/tab-recording/background.js");
+  const module = createTabRecordingModule({ isMediaCaptureBusy: async () => false });
+  module.register();
 
   return {
     calls,
@@ -178,19 +167,13 @@ function makeHarness() {
       };
     },
     send(message) {
-      return new Promise((resolve, reject) => {
-        const timeout = global.setTimeout(() => reject(new Error("background response timeout")), 1_000);
-        listeners.message(message, {}, (response) => {
-          global.clearTimeout(timeout);
-          resolve(response);
-        });
-      });
+      return module.handleMessage(message).catch((error) => ({ ok: false, error: error.message }));
     }
   };
 }
 
 test("isolation starts immediately after injection and injection failure is fail-closed", async () => {
-  const harness = makeHarness();
+  const harness = await makeHarness();
 
   const ordinaryStart = harness.send({ type: "START_TAB_RECORDING", tabId: 7, interactionLockEnabled: false });
   const ordinaryResult = await ordinaryStart;
@@ -230,7 +213,7 @@ test("isolation starts immediately after injection and injection failure is fail
 });
 
 test("unsupported MP4 fails before mouse isolation and tab capture", async () => {
-  const harness = makeHarness();
+  const harness = await makeHarness();
   harness.setMp4Supported(false);
 
   const result = await harness.send({
@@ -249,7 +232,7 @@ test("unsupported MP4 fails before mouse isolation and tab capture", async () =>
 });
 
 test("mouse isolation can be enabled and disabled while recording", async () => {
-  const harness = makeHarness();
+  const harness = await makeHarness();
   assert.equal((await harness.send({
     type: "START_TAB_RECORDING",
     tabId: 8,
@@ -285,7 +268,7 @@ test("mouse isolation can be enabled and disabled while recording", async () => 
 });
 
 test("keyboard isolation can be enabled and disabled while recording", async () => {
-  const harness = makeHarness();
+  const harness = await makeHarness();
   assert.equal((await harness.send({
     type: "START_TAB_RECORDING",
     tabId: 12,
@@ -316,7 +299,7 @@ test("keyboard isolation can be enabled and disabled while recording", async () 
 });
 
 test("keyboard isolation is applied before capture and navigation stops the recording", async () => {
-  const harness = makeHarness();
+  const harness = await makeHarness();
   const result = await harness.send({
     type: "START_TAB_RECORDING",
     tabId: 13,
@@ -326,7 +309,7 @@ test("keyboard isolation is applied before capture and navigation stops the reco
   assert.equal(result.ok, true);
 
   const keyboardIndex = harness.calls.findIndex(
-    (call) => call.type === "script" && call.details.files?.includes("keyboard-lock.js")
+    (call) => call.type === "script" && call.details.files?.some((file) => file.endsWith("keyboard-lock.js"))
   );
   const captureIndex = harness.calls.findIndex((call) => call.type === "capture");
   assert.ok(keyboardIndex >= 0 && keyboardIndex < captureIndex);
@@ -337,7 +320,7 @@ test("keyboard isolation is applied before capture and navigation stops the reco
 });
 
 test("keyboard isolation injection failure prevents capture", async () => {
-  const harness = makeHarness();
+  const harness = await makeHarness();
   harness.setInjectionFailure(true);
   const result = await harness.send({
     type: "START_TAB_RECORDING",
@@ -352,7 +335,7 @@ test("keyboard isolation injection failure prevents capture", async () => {
 });
 
 test("a failed runtime enable keeps the recording running", async () => {
-  const harness = makeHarness();
+  const harness = await makeHarness();
   assert.equal((await harness.send({
     type: "START_TAB_RECORDING",
     tabId: 10,
@@ -372,7 +355,7 @@ test("a failed runtime enable keeps the recording running", async () => {
 });
 
 test("navigation stops an isolated recording and unlocks the tab", async () => {
-  const harness = makeHarness();
+  const harness = await makeHarness();
   assert.equal((await harness.send({
     type: "START_TAB_RECORDING",
     tabId: 9,

@@ -5,7 +5,11 @@ const test = require("node:test");
 
 const root = path.join(__dirname, "..");
 const html = fs.readFileSync(path.join(root, "popup.html"), "utf8");
-const script = fs.readFileSync(path.join(root, "popup.js"), "utf8");
+const script = fs.readFileSync(path.join(root, "features", "tab-recording", "popup.js"), "utf8");
+
+test("media capture UI is hidden by default in the milestone shell", () => {
+  assert.match(html, /id="mediaCaptureModule"[^>]*hidden/);
+});
 
 test("mouse isolation is an opt-in, non-persisted popup setting", () => {
   assert.match(html, /id="interactionLockCheckbox"[^>]*type="checkbox"/);

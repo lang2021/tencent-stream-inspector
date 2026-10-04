@@ -1,11 +1,13 @@
 # Authorized Stream Inspector
 
-当前版本：`0.7.1`
+当前版本：`0.8.0`
 
-一个本地 Chrome Manifest V3 扩展，用于在用户明确有权处理的页面上：
+一个本地 Chrome Manifest V3 扩展。当前里程碑默认只显示录屏模块；媒体数据捕获模块仍保留在代码中，但默认休眠，便于后续独立开发和恢复。
+
+在用户明确有权处理的页面上，扩展可以：
 
 1. 直接录制当前标签页，输出 H.264/AAC MP4。
-2. 观察并保存浏览器已经收到的媒体响应数据。
+2. 观察并保存浏览器已经收到的媒体响应数据（开发模块，默认隐藏）。
 
 扩展不调用服务器、不重新请求媒体 URL、不尝试绕过 DRM，也不会录制桌面、其他窗口或浏览器工具栏。
 
@@ -34,7 +36,17 @@
 - 任一隔离开启时发生完整页面导航，录像会自动停止并保存已有内容。
 - 隔离使用约 12 秒安全租约并定期续租；扩展重载或注入脚本失活后会自动失效。
 
-## 功能二：媒体响应捕获
+## 开发模块：媒体响应捕获（默认隐藏）
+
+媒体捕获代码没有删除，只是由 `features/feature-flags.js` 中的 `mediaCapture.enabled = false` 关闭。关闭时不会挂载弹窗界面、创建捕获缓存、注册 `chrome.debugger` 监听器，也不会响应媒体捕获消息。
+
+如需恢复该模块，只修改功能开关：
+
+```js
+mediaCapture: Object.freeze({ enabled: true })
+```
+
+然后在 `chrome://extensions` 重新加载扩展。Manifest 中仍保留 `debugger` 权限，因此不需要再次调整权限文件。
 
 - 使用 Chrome DevTools Protocol 观察当前标签页的网络响应。
 - 识别 HLS `m3u8` 清单和 `ts`、`m4s`、`mp4` 分片。
@@ -71,24 +83,24 @@
 
 ### 保存媒体响应
 
-1. 点击“开始捕获”。
-2. 在目标页面播放需要观察的内容。
-3. 点击“停止”。
-4. 点击“保存内容”。
+媒体捕获默认不可见。重新启用后，才会在弹窗中显示“媒体数据捕获”模块，并按原流程操作：开始捕获、播放内容、停止、保存内容。
 
 ## 正常运行架构
 
-扩展内部有以下逻辑组件：
+扩展内部按功能划分为以下逻辑组件：
 
-- `background.js`：Manifest V3 Service Worker，处理按钮消息、下载状态和标签页权限；空闲时可被 Chrome 挂起。
+- `background.js`：Manifest V3 ES Module Service Worker，只负责读取功能开关、分发消息和协调模块互斥；空闲时可被 Chrome 挂起。
+- `features/feature-flags.js`：功能开关，当前启用录屏、关闭媒体捕获。
+- `features/tab-recording/`：录屏后台生命周期和弹窗控制；根目录的离屏页面、OPFS Worker 与隔离脚本是它使用的运行资源。
+- `features/media-capture/`：媒体响应捕获后台逻辑和弹窗控制；默认不注册。
 - `offscreen.html` / `offscreen.js`：离屏扩展页面，承载 `MediaRecorder`，保证关闭弹窗后录像仍可继续。
 - `opfs-writer.js`：离屏页面创建的专用 Worker，按顺序把录像数据写入 OPFS。
 - `interaction-lock.js`、`keyboard-lock.js`：仅在用户开启相应隔离时注入目标页面。
-- `popup.html` / `popup.js`：用户打开扩展时显示的控制界面。
+- `popup.html` / `popup.js`：共享弹窗外壳；具体功能界面由对应模块挂载。
 
 这些是扩展内部的逻辑上下文，不等于多个独立 Chrome 应用。Chrome 还会为所有网页和扩展共享 GPU、网络、音频、视频捕获和存储进程。
 
-正常使用本扩展不会启动多个带独立临时配置目录的 Headless Chrome。如果开发测试使用 Headless Chrome，测试结束后必须确认进程退出并删除对应的临时 profile。
+正常使用本扩展不会启动 Headless Chrome，也不会启动外部进程。自动化测试同样不应创建 Headless Chrome 或 `/tmp/codex-mp4-*` 临时 profile；如果开发者另行运行浏览器探针，测试结束后必须确认进程退出并删除对应 profile。
 
 ## 存储与清理
 
@@ -117,10 +129,12 @@
 
 本项目是 `30_Workbench` 下的独立 Git 仓库，不属于 Nexus 生产知识流程。
 
-检查 JavaScript 语法：
+检查 JavaScript 和 ES Module 语法：
 
 ```bash
-for file in background.js offscreen.js opfs-writer.js interaction-lock.js keyboard-lock.js popup.js; do
+for file in background.js popup.js offscreen.js opfs-writer.js interaction-lock.js keyboard-lock.js \
+  features/feature-flags.js features/tab-recording/background.js features/tab-recording/popup.js \
+  features/media-capture/background.js features/media-capture/popup.js; do
   node --check "$file"
 done
 ```

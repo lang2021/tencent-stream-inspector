@@ -15,7 +15,7 @@
         </div>
       </header>
 
-      <section class="tool-section" aria-labelledby="dataCaptureTitle">
+      <section id="mediaCaptureModule" class="tool-section" aria-labelledby="dataCaptureTitle" hidden>
         <div class="section-heading">
           <h2 id="dataCaptureTitle">媒体数据捕获</h2>
           <span id="statusDot" class="status-dot"></span>
@@ -40,7 +40,7 @@
         <p id="errorText" class="error" hidden></p>
       </section>
 
-      <section class="tool-section recording-section" aria-labelledby="tabRecordingTitle">
+      <section id="tabRecordingModule" class="tool-section recording-section" aria-labelledby="tabRecordingTitle">
         <div class="section-heading">
           <h2 id="tabRecordingTitle">当前标签页录屏</h2>
           <span id="recordingDot" class="status-dot"></span>
@@ -79,6 +79,6 @@
         <p id="recordingErrorText" class="error" hidden></p>
       </section>
     </main>
-    <script src="popup.js"></script>
+    <script type="module" src="popup.js"></script>
   </body>
 </html>
