@@ -35,8 +35,7 @@ function makeHarness() {
           status: "recording",
           tabId: message.tabId,
           interactionLockRequested: Boolean(message.interactionLockRequested),
-          interactionLockActive: Boolean(message.interactionLockActive),
-          lockSettlesAt: null
+          interactionLockActive: Boolean(message.interactionLockActive)
         };
         calls.push({ type: "offscreen-start", message });
         return Promise.resolve({ ok: true, state: offscreenState });
@@ -49,6 +48,16 @@ function makeHarness() {
           terminationReason: message.reason || null
         };
         calls.push({ type: "offscreen-stop", message });
+        return Promise.resolve({ ok: true, state: offscreenState });
+      }
+      if (message.type === "OFFSCREEN_SET_INTERACTION_LOCK") {
+        offscreenState = {
+          ...offscreenState,
+          interactionLockRequested: Boolean(message.requested),
+          interactionLockActive: Boolean(message.active),
+          interactionLockError: message.error || null
+        };
+        calls.push({ type: "offscreen-lock", message });
         return Promise.resolve({ ok: true, state: offscreenState });
       }
       return Promise.resolve({ ok: true, state: offscreenState });
@@ -120,7 +129,15 @@ function makeHarness() {
     scheduled,
     listeners,
     setInjectionFailure(value) { injectionShouldFail = value; },
-    setIdle() { offscreenState = { ...offscreenState, status: "idle", tabId: null, interactionLockActive: false }; },
+    setIdle() {
+      offscreenState = {
+        ...offscreenState,
+        status: "idle",
+        tabId: null,
+        interactionLockRequested: false,
+        interactionLockActive: false
+      };
+    },
     send(message) {
       return new Promise((resolve, reject) => {
         const timeout = global.setTimeout(() => reject(new Error("background response timeout")), 1_000);
@@ -133,7 +150,7 @@ function makeHarness() {
   };
 }
 
-test("isolation starts after injection and settle delay, and injection failure is fail-closed", async () => {
+test("isolation starts immediately after injection and injection failure is fail-closed", async () => {
   const harness = makeHarness();
 
   const ordinaryStart = harness.send({ type: "START_TAB_RECORDING", tabId: 7, interactionLockEnabled: false });
@@ -147,16 +164,11 @@ test("isolation starts after injection and settle delay, and injection failure i
   harness.setIdle();
   harness.calls.length = 0;
 
-  const isolatedStart = harness.send({ type: "START_TAB_RECORDING", tabId: 7, interactionLockEnabled: true });
-  await new Promise((resolve) => global.setImmediate(resolve));
+  const isolatedResult = await harness.send({ type: "START_TAB_RECORDING", tabId: 7, interactionLockEnabled: true });
   const fileIndex = harness.calls.findIndex((call) => call.type === "script" && call.details.files);
-  const waitIndex = harness.scheduled.findIndex((item) => item.delay === 2_000);
   assert.ok(fileIndex >= 0);
-  assert.ok(waitIndex >= 0);
-  assert.equal(harness.calls.some((call) => call.type === "capture"), false);
-  harness.scheduled[waitIndex].callback();
-  const isolatedResult = await isolatedStart;
   assert.equal(isolatedResult.ok, true);
+  assert.equal(harness.scheduled.some((item) => item.delay === 2_000), false);
   const captureIndex = harness.calls.findIndex((call) => call.type === "capture");
   assert.ok(fileIndex < captureIndex);
 
@@ -169,12 +181,69 @@ test("isolation starts after injection and settle delay, and injection failure i
   assert.equal(harness.calls.some((call) => call.type === "capture"), false);
 });
 
+test("mouse isolation can be enabled and disabled while recording", async () => {
+  const harness = makeHarness();
+  assert.equal((await harness.send({
+    type: "START_TAB_RECORDING",
+    tabId: 8,
+    interactionLockEnabled: false
+  })).ok, true);
+
+  const enabled = await harness.send({
+    type: "SET_RECORDING_INTERACTION_LOCK",
+    tabId: 8,
+    enabled: true
+  });
+  assert.equal(enabled.ok, true);
+  assert.equal(enabled.state.interactionLockActive, true);
+  assert.equal(harness.calls.some((call) => call.type === "offscreen-lock" && call.message.active), true);
+
+  const disabled = await harness.send({
+    type: "SET_RECORDING_INTERACTION_LOCK",
+    tabId: 8,
+    enabled: false
+  });
+  assert.equal(disabled.ok, true);
+  assert.equal(disabled.state.interactionLockActive, false);
+  assert.equal(harness.calls.some((call) => call.type === "script" && call.details.func?.toString().includes("deactivate")), true);
+
+  const stopsBeforeNavigation = harness.calls.filter((call) => call.type === "offscreen-stop").length;
+  harness.listeners.updated(8, { status: "loading" });
+  await new Promise((resolve) => global.setImmediate(resolve));
+  assert.equal(
+    harness.calls.filter((call) => call.type === "offscreen-stop").length,
+    stopsBeforeNavigation,
+    "navigation should not stop recording after isolation is disabled"
+  );
+});
+
+test("a failed runtime enable keeps the recording running", async () => {
+  const harness = makeHarness();
+  assert.equal((await harness.send({
+    type: "START_TAB_RECORDING",
+    tabId: 10,
+    interactionLockEnabled: false
+  })).ok, true);
+  harness.setInjectionFailure(true);
+
+  const result = await harness.send({
+    type: "SET_RECORDING_INTERACTION_LOCK",
+    tabId: 10,
+    enabled: true
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.state.status, "recording");
+  assert.equal(result.state.interactionLockActive, false);
+  assert.equal(harness.calls.some((call) => call.type === "offscreen-stop"), false);
+});
+
 test("navigation stops an isolated recording and unlocks the tab", async () => {
   const harness = makeHarness();
-  const start = harness.send({ type: "START_TAB_RECORDING", tabId: 9, interactionLockEnabled: true });
-  await new Promise((resolve) => global.setImmediate(resolve));
-  harness.scheduled.find((item) => item.delay === 2_000).callback();
-  assert.equal((await start).ok, true);
+  assert.equal((await harness.send({
+    type: "START_TAB_RECORDING",
+    tabId: 9,
+    interactionLockEnabled: true
+  })).ok, true);
 
   harness.listeners.updated(9, { status: "loading" });
   await new Promise((resolve) => global.setImmediate(resolve));

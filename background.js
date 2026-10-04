@@ -9,7 +9,6 @@ const OFFSCREEN_DOCUMENT_URL = "offscreen.html";
 const DOWNLOAD_KEY_PREFIX = "authorizedTabRecordingDownload:";
 const RECOVERY_KEY = "authorizedTabRecordingRecovery";
 const INTERACTION_LOCK_SCRIPT = "interaction-lock.js";
-const INTERACTION_LOCK_SETTLE_MS = 2_000;
 const ACTIVE_RECORDING_STATUSES = new Set(["starting", "recording", "stopping", "saving"]);
 
 let creatingOffscreenDocument = null;
@@ -34,7 +33,6 @@ let lastRecordingState = {
   lastError: null,
   interactionLockRequested: false,
   interactionLockActive: false,
-  lockSettlesAt: null,
   interactionLockError: null,
   terminationReason: null
 };
@@ -100,10 +98,6 @@ async function messageOffscreen(type, details = {}) {
   return chrome.runtime.sendMessage({ target: "offscreen", type, ...details });
 }
 
-function sleep(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
 async function injectInteractionLock(tabId) {
   if (!chrome.scripting?.executeScript) {
     throw new Error("当前 Chrome 不支持脚本注入，无法启用鼠标隔离");
@@ -120,20 +114,23 @@ async function injectInteractionLock(tabId) {
 }
 
 async function releaseInteractionLock(tabId) {
-  if (!tabId || interactionLockTabId !== tabId) return;
+  if (!tabId || interactionLockTabId !== tabId) return { ok: true, error: null };
   if (!chrome.scripting?.executeScript) {
     interactionLockTabId = null;
-    return;
+    return { ok: false, error: "当前 Chrome 无法立即解除鼠标隔离" };
   }
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
       func: () => globalThis.__authorizedStreamInspectorInteractionLock?.deactivate?.() || { active: false }
     });
-  } catch {
+  } catch (error) {
     // A closed or navigated tab no longer needs an in-page unlock.
+    if (interactionLockTabId === tabId) interactionLockTabId = null;
+    return { ok: false, error: `无法立即解除鼠标隔离：${error.message}` };
   }
   if (interactionLockTabId === tabId) interactionLockTabId = null;
+  return { ok: true, error: null };
 }
 
 function isRecordingActive(state) {
@@ -217,7 +214,7 @@ async function stopRecordingForNavigation(tabId) {
   }
 
   const current = lastRecordingState;
-  if (current.tabId !== tabId || !current.interactionLockRequested || !isRecordingActive(current)) return;
+  if (current.tabId !== tabId || !current.interactionLockActive || !isRecordingActive(current)) return;
 
   const reason = "页面发生导航，已停止录制以保持鼠标隔离";
   try {
@@ -503,6 +500,55 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       return;
     }
 
+    if (message.type === "SET_RECORDING_INTERACTION_LOCK") {
+      const recordingState = await getRecordingState();
+      if (recordingState.status !== "recording" || !recordingState.tabId) {
+        throw new Error("只有正在录制时才能切换鼠标隔离");
+      }
+
+      const enabled = message.enabled === true;
+      const tabId = recordingState.tabId;
+      if (enabled) {
+        try {
+          await injectInteractionLock(tabId);
+          interactionLockTabId = tabId;
+          const result = await messageOffscreen("OFFSCREEN_SET_INTERACTION_LOCK", {
+            requested: true,
+            active: true,
+            error: null
+          });
+          if (!result?.ok) throw new Error(result?.error || "无法更新鼠标隔离状态");
+          broadcastRecording(result.state);
+          respond({ ok: true, state: lastRecordingState });
+        } catch (error) {
+          await releaseInteractionLock(tabId);
+          const result = await messageOffscreen("OFFSCREEN_SET_INTERACTION_LOCK", {
+            requested: false,
+            active: false,
+            error: error.message
+          }).catch(() => null);
+          if (result?.state) broadcastRecording(result.state);
+          respond({ ok: false, error: error.message, state: lastRecordingState });
+        }
+        return;
+      }
+
+      const released = await releaseInteractionLock(tabId);
+      const result = await messageOffscreen("OFFSCREEN_SET_INTERACTION_LOCK", {
+        requested: false,
+        active: false,
+        error: released.ok ? null : released.error
+      });
+      if (!result?.ok) throw new Error(result?.error || "无法更新鼠标隔离状态");
+      broadcastRecording(result.state);
+      respond({
+        ok: released.ok,
+        error: released.error,
+        state: lastRecordingState
+      });
+      return;
+    }
+
     if (message.type === "START_TAB_RECORDING") {
       const tabId = message.tabId;
       if (!tabId) throw new Error("没有找到活动标签页");
@@ -540,7 +586,6 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
           lastError: null,
           interactionLockRequested,
           interactionLockActive: false,
-          lockSettlesAt: interactionLockRequested ? Date.now() + INTERACTION_LOCK_SETTLE_MS : null,
           interactionLockError: null,
           terminationReason: null
         };
@@ -551,10 +596,8 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
           interactionLockTabId = tabId;
           broadcastRecording({
             ...lastRecordingState,
-            interactionLockActive: true,
-            lockSettlesAt: Date.now() + INTERACTION_LOCK_SETTLE_MS
+            interactionLockActive: true
           });
-          await sleep(INTERACTION_LOCK_SETTLE_MS);
           if (startAttempt.cancelled) throw new Error(startAttempt.cancelReason || "录制启动已取消");
         }
 
@@ -585,7 +628,6 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
           durationMs: 0,
           bytes: 0,
           interactionLockActive: false,
-          lockSettlesAt: null,
           interactionLockError: interactionLockRequested ? error.message : null,
           lastError: error.message
         };

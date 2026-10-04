@@ -57,12 +57,10 @@ function renderRecording(state) {
   const status = recordingState.status;
   const active = ["starting", "recording", "stopping", "saving"].includes(status);
   const otherTab = Boolean(recordingState.tabId && activeTabId && recordingState.tabId !== activeTabId);
-  const lockEnabled = Boolean(recordingState.interactionLockRequested);
-  const lockSettling = status === "starting" && recordingState.interactionLockActive && recordingState.lockSettlesAt;
+  const lockEnabled = Boolean(recordingState.interactionLockActive);
   $("recordingDot").className = `status-dot ${status === "recording" ? "recording" : active ? "warn" : ""}`;
-  $("recordingStatusText").textContent = lockSettling ? "已隔离鼠标，2 秒后开始录制" :
-    status === "starting" ? "正在连接当前标签页" :
-    status === "recording" ? (otherTab ? "正在录制另一个标签页" : "正在录制当前标签页") :
+  $("recordingStatusText").textContent = status === "starting" ? "正在连接当前标签页" :
+    status === "recording" ? `${otherTab ? "正在录制另一个标签页" : "正在录制当前标签页"}${lockEnabled ? " · 鼠标已隔离" : ""}` :
     status === "stopping" ? "正在结束录制" :
     status === "saving" ? "正在保存 WebM" :
     status === "saved" ? "录制已保存到下载目录" :
@@ -78,8 +76,8 @@ function renderRecording(state) {
   const recordingError = recordingState.lastError || recordingState.interactionLockError || "";
   $("recordingErrorText").hidden = !recordingError;
   $("recordingErrorText").textContent = recordingError;
-  $("interactionLockCheckbox").checked = active ? lockEnabled : false;
-  $("interactionLockCheckbox").disabled = active;
+  $("interactionLockCheckbox").checked = status === "recording" || status === "starting" ? lockEnabled : false;
+  $("interactionLockCheckbox").disabled = ["starting", "stopping", "saving"].includes(status);
   updateRecordingMetrics();
 
   clearInterval(recordingClock);
@@ -129,12 +127,27 @@ $("startRecordingButton").addEventListener("click", async () => {
     bytes: 0,
     durationMs: 0,
     interactionLockRequested: interactionLockEnabled,
-    interactionLockActive: false,
-    lockSettlesAt: interactionLockEnabled ? Date.now() + 2_000 : null
+    interactionLockActive: interactionLockEnabled
   });
   const result = await send("START_TAB_RECORDING", { interactionLockEnabled });
   if (!result?.ok) {
     renderRecording({ status: "error", tabId: activeTabId, bytes: 0, durationMs: 0, lastError: result?.error || "无法开始录制" });
+    return;
+  }
+  renderRecording(result.state);
+});
+
+$("interactionLockCheckbox").addEventListener("change", async () => {
+  if (recordingState?.status !== "recording") return;
+  const checkbox = $("interactionLockCheckbox");
+  const enabled = checkbox.checked;
+  checkbox.disabled = true;
+  const result = await send("SET_RECORDING_INTERACTION_LOCK", { enabled });
+  if (!result?.ok) {
+    renderRecording({
+      ...(result?.state || recordingState || {}),
+      interactionLockError: result?.error || "无法切换鼠标隔离"
+    });
     return;
   }
   renderRecording(result.state);

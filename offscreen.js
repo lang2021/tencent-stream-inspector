@@ -40,7 +40,6 @@ function idleState() {
     lastError: null,
     interactionLockRequested: false,
     interactionLockActive: false,
-    lockSettlesAt: null,
     interactionLockError: null,
     terminationReason: null
   };
@@ -394,6 +393,15 @@ async function stopRecording(reason = null) {
   return publicState();
 }
 
+function setInteractionLockState({ requested, active, error }) {
+  if (state.status !== "recording") throw new Error("当前没有正在进行的录制");
+  state.interactionLockRequested = Boolean(requested);
+  state.interactionLockActive = Boolean(active);
+  state.interactionLockError = error || null;
+  broadcast();
+  return publicState();
+}
+
 async function startRecording(streamId, tabId, interactionDetails = {}) {
   if (recorder && recorder.state !== "inactive") throw new Error("已有标签页正在录制");
 
@@ -407,8 +415,7 @@ async function startRecording(streamId, tabId, interactionDetails = {}) {
     tabId,
     startedAt: Date.now(),
     interactionLockRequested: Boolean(interactionDetails.requested),
-    interactionLockActive: Boolean(interactionDetails.active),
-    lockSettlesAt: null
+    interactionLockActive: Boolean(interactionDetails.active)
   };
   state.recoveryAvailable = Boolean(recovery);
   state.recoveryBytes = recovery?.bytes || 0;
@@ -576,6 +583,17 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     }
     if (message.type === "OFFSCREEN_STOP_RECORDING") {
       respond({ ok: true, state: await stopRecording(message.reason || null) });
+      return;
+    }
+    if (message.type === "OFFSCREEN_SET_INTERACTION_LOCK") {
+      respond({
+        ok: true,
+        state: setInteractionLockState({
+          requested: message.requested,
+          active: message.active,
+          error: message.error
+        })
+      });
       return;
     }
     if (message.type === "OFFSCREEN_EXPORT_RECOVERY") {
