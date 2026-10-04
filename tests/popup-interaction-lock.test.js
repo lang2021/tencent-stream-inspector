@@ -17,6 +17,14 @@ test("mouse isolation is an opt-in, non-persisted popup setting", () => {
   assert.doesNotMatch(script, /chrome\.storage/);
 });
 
+test("keyboard isolation is an independent, non-persisted popup setting", () => {
+  assert.match(html, /id="keyboardLockCheckbox"[^>]*type="checkbox"/);
+  assert.doesNotMatch(html, /id="keyboardLockCheckbox"[^>]*checked/);
+  assert.match(script, /keyboardLockCheckbox.*\.checked/);
+  assert.match(script, /keyboardLockEnabled/);
+  assert.match(script, /SET_RECORDING_KEYBOARD_LOCK/);
+});
+
 test("popup reports MP4 recording and preserves the old WebM recovery label", () => {
   assert.match(html, /id="recordingFormat"/);
   assert.match(html, /MP4 · H\.264\/AAC/);

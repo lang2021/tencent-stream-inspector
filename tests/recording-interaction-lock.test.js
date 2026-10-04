@@ -13,6 +13,7 @@ function makeHarness() {
   const listeners = { message: null, updated: null, removed: null };
   let offscreenAvailable = false;
   let lockInjected = false;
+  let keyboardLockInjected = false;
   let injectionShouldFail = false;
   let mp4Supported = true;
   let nextDownloadId = 1;
@@ -20,7 +21,9 @@ function makeHarness() {
     status: "idle",
     tabId: null,
     interactionLockRequested: false,
-    interactionLockActive: false
+    interactionLockActive: false,
+    keyboardLockRequested: false,
+    keyboardLockActive: false
   };
 
   const runtime = {
@@ -48,7 +51,9 @@ function makeHarness() {
           tabId: message.tabId,
           mimeType: message.mimeType,
           interactionLockRequested: Boolean(message.interactionLockRequested),
-          interactionLockActive: Boolean(message.interactionLockActive)
+          interactionLockActive: Boolean(message.interactionLockActive),
+          keyboardLockRequested: Boolean(message.keyboardLockRequested),
+          keyboardLockActive: Boolean(message.keyboardLockActive)
         };
         calls.push({ type: "offscreen-start", message });
         return Promise.resolve({ ok: true, state: offscreenState });
@@ -71,6 +76,16 @@ function makeHarness() {
           interactionLockError: message.error || null
         };
         calls.push({ type: "offscreen-lock", message });
+        return Promise.resolve({ ok: true, state: offscreenState });
+      }
+      if (message.type === "OFFSCREEN_SET_KEYBOARD_LOCK") {
+        offscreenState = {
+          ...offscreenState,
+          keyboardLockRequested: Boolean(message.requested),
+          keyboardLockActive: Boolean(message.active),
+          keyboardLockError: message.error || null
+        };
+        calls.push({ type: "offscreen-keyboard-lock", message });
         return Promise.resolve({ ok: true, state: offscreenState });
       }
       return Promise.resolve({ ok: true, state: offscreenState });
@@ -100,11 +115,19 @@ function makeHarness() {
           calls.push({ type: "script", details });
           if (details.files) {
             if (injectionShouldFail) throw new Error("注入失败");
-            lockInjected = true;
+            if (details.files.includes("keyboard-lock.js")) keyboardLockInjected = true;
+            else lockInjected = true;
             return [];
           }
-          if (details.func?.toString().includes("isActive")) return [{ result: lockInjected }];
-          lockInjected = false;
+          const functionSource = details.func?.toString() || "";
+          if (functionSource.includes("KeyboardLock") && functionSource.includes("isActive")) {
+            return [{ result: keyboardLockInjected }];
+          }
+          if (functionSource.includes("InteractionLock") && functionSource.includes("isActive")) {
+            return [{ result: lockInjected }];
+          }
+          if (functionSource.includes("KeyboardLock")) keyboardLockInjected = false;
+          else lockInjected = false;
           return [{ result: { active: false } }];
         }
       },
@@ -149,7 +172,9 @@ function makeHarness() {
         status: "idle",
         tabId: null,
         interactionLockRequested: false,
-        interactionLockActive: false
+        interactionLockActive: false,
+        keyboardLockRequested: false,
+        keyboardLockActive: false
       };
     },
     send(message) {
@@ -211,7 +236,8 @@ test("unsupported MP4 fails before mouse isolation and tab capture", async () =>
   const result = await harness.send({
     type: "START_TAB_RECORDING",
     tabId: 11,
-    interactionLockEnabled: true
+    interactionLockEnabled: true,
+    keyboardLockEnabled: true
   });
 
   assert.equal(result.ok, false);
@@ -256,6 +282,73 @@ test("mouse isolation can be enabled and disabled while recording", async () => 
     stopsBeforeNavigation,
     "navigation should not stop recording after isolation is disabled"
   );
+});
+
+test("keyboard isolation can be enabled and disabled while recording", async () => {
+  const harness = makeHarness();
+  assert.equal((await harness.send({
+    type: "START_TAB_RECORDING",
+    tabId: 12,
+    interactionLockEnabled: false,
+    keyboardLockEnabled: false
+  })).ok, true);
+
+  const enabled = await harness.send({
+    type: "SET_RECORDING_KEYBOARD_LOCK",
+    tabId: 12,
+    enabled: true
+  });
+  assert.equal(enabled.ok, true);
+  assert.equal(enabled.state.keyboardLockActive, true);
+  assert.equal(harness.calls.some((call) => call.type === "offscreen-keyboard-lock" && call.message.active), true);
+
+  const disabled = await harness.send({
+    type: "SET_RECORDING_KEYBOARD_LOCK",
+    tabId: 12,
+    enabled: false
+  });
+  assert.equal(disabled.ok, true);
+  assert.equal(disabled.state.keyboardLockActive, false);
+  assert.equal(
+    harness.calls.some((call) => call.type === "script" && call.details.func?.toString().includes("KeyboardLock") && call.details.func?.toString().includes("deactivate")),
+    true
+  );
+});
+
+test("keyboard isolation is applied before capture and navigation stops the recording", async () => {
+  const harness = makeHarness();
+  const result = await harness.send({
+    type: "START_TAB_RECORDING",
+    tabId: 13,
+    interactionLockEnabled: false,
+    keyboardLockEnabled: true
+  });
+  assert.equal(result.ok, true);
+
+  const keyboardIndex = harness.calls.findIndex(
+    (call) => call.type === "script" && call.details.files?.includes("keyboard-lock.js")
+  );
+  const captureIndex = harness.calls.findIndex((call) => call.type === "capture");
+  assert.ok(keyboardIndex >= 0 && keyboardIndex < captureIndex);
+
+  harness.listeners.updated(13, { status: "loading" });
+  await new Promise((resolve) => global.setImmediate(resolve));
+  assert.equal(harness.calls.some((call) => call.type === "offscreen-stop"), true);
+});
+
+test("keyboard isolation injection failure prevents capture", async () => {
+  const harness = makeHarness();
+  harness.setInjectionFailure(true);
+  const result = await harness.send({
+    type: "START_TAB_RECORDING",
+    tabId: 14,
+    interactionLockEnabled: false,
+    keyboardLockEnabled: true
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(harness.calls.some((call) => call.type === "capture"), false);
+  assert.equal(harness.calls.some((call) => call.type === "offscreen-start"), false);
 });
 
 test("a failed runtime enable keeps the recording running", async () => {

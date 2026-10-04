@@ -9,10 +9,12 @@ const OFFSCREEN_DOCUMENT_URL = "offscreen.html";
 const DOWNLOAD_KEY_PREFIX = "authorizedTabRecordingDownload:";
 const RECOVERY_KEY = "authorizedTabRecordingRecovery";
 const INTERACTION_LOCK_SCRIPT = "interaction-lock.js";
+const KEYBOARD_LOCK_SCRIPT = "keyboard-lock.js";
 const ACTIVE_RECORDING_STATUSES = new Set(["starting", "recording", "stopping", "saving"]);
 
 let creatingOffscreenDocument = null;
 let interactionLockTabId = null;
+let keyboardLockTabId = null;
 let pendingRecordingStart = null;
 let lastRecordingState = {
   status: "idle",
@@ -35,6 +37,9 @@ let lastRecordingState = {
   interactionLockRequested: false,
   interactionLockActive: false,
   interactionLockError: null,
+  keyboardLockRequested: false,
+  keyboardLockActive: false,
+  keyboardLockError: null,
   terminationReason: null
 };
 
@@ -62,6 +67,12 @@ function normalizeRecordingState(state) {
     interactionLockActive: Boolean(
       state?.interactionLockRequested &&
       interactionLockTabId === state?.tabId &&
+      ACTIVE_RECORDING_STATUSES.has(state?.status)
+    ),
+    keyboardLockRequested: Boolean(state?.keyboardLockRequested),
+    keyboardLockActive: Boolean(
+      state?.keyboardLockRequested &&
+      keyboardLockTabId === state?.tabId &&
       ACTIVE_RECORDING_STATUSES.has(state?.status)
     )
   };
@@ -134,6 +145,51 @@ async function releaseInteractionLock(tabId) {
   return { ok: true, error: null };
 }
 
+async function injectKeyboardLock(tabId) {
+  if (!chrome.scripting?.executeScript) {
+    throw new Error("当前 Chrome 不支持脚本注入，无法启用键盘隔离");
+  }
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: [KEYBOARD_LOCK_SCRIPT]
+  });
+  const [confirmation] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => Boolean(globalThis.__authorizedStreamInspectorKeyboardLock?.isActive?.())
+  });
+  if (!confirmation?.result) throw new Error("无法确认键盘隔离已启用");
+}
+
+async function releaseKeyboardLock(tabId) {
+  if (!tabId || keyboardLockTabId !== tabId) return { ok: true, error: null };
+  if (!chrome.scripting?.executeScript) {
+    keyboardLockTabId = null;
+    return { ok: false, error: "当前 Chrome 无法立即解除键盘隔离" };
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => globalThis.__authorizedStreamInspectorKeyboardLock?.deactivate?.() || { active: false }
+    });
+  } catch (error) {
+    if (keyboardLockTabId === tabId) keyboardLockTabId = null;
+    return { ok: false, error: `无法立即解除键盘隔离：${error.message}` };
+  }
+  if (keyboardLockTabId === tabId) keyboardLockTabId = null;
+  return { ok: true, error: null };
+}
+
+async function releaseRecordingLocks(tabId) {
+  const [pointer, keyboard] = await Promise.all([
+    releaseInteractionLock(tabId),
+    releaseKeyboardLock(tabId)
+  ]);
+  return {
+    ok: pointer.ok && keyboard.ok,
+    error: pointer.error || keyboard.error || null
+  };
+}
+
 function isRecordingActive(state) {
   return ACTIVE_RECORDING_STATUSES.has(state?.status);
 }
@@ -201,13 +257,15 @@ async function stopRecordingForNavigation(tabId) {
   if (pending?.tabId === tabId) {
     pending.cancelled = true;
     pending.cancelReason = "页面发生导航，已取消录制启动";
-    await releaseInteractionLock(tabId);
+    await releaseRecordingLocks(tabId);
     if (lastRecordingState.tabId === tabId && lastRecordingState.status === "starting") {
       broadcastRecording({
         ...lastRecordingState,
         status: "error",
         interactionLockActive: false,
         interactionLockError: pending.cancelReason,
+        keyboardLockActive: false,
+        keyboardLockError: pending.cancelReason,
         lastError: pending.cancelReason
       });
     }
@@ -215,20 +273,23 @@ async function stopRecordingForNavigation(tabId) {
   }
 
   const current = lastRecordingState;
-  if (current.tabId !== tabId || !current.interactionLockActive || !isRecordingActive(current)) return;
+  if (current.tabId !== tabId ||
+      (!current.interactionLockActive && !current.keyboardLockActive) ||
+      !isRecordingActive(current)) return;
 
-  const reason = "页面发生导航，已停止录制以保持鼠标隔离";
+  const reason = "页面发生导航，已停止录制以保持交互隔离";
   try {
     const result = await messageOffscreen("OFFSCREEN_STOP_RECORDING", { reason });
-    await releaseInteractionLock(tabId);
+    await releaseRecordingLocks(tabId);
     if (!result?.ok) throw new Error(result?.error || "页面导航时无法停止录制");
     broadcastRecording({ ...result.state, terminationReason: reason });
   } catch (error) {
-    await releaseInteractionLock(tabId);
+    await releaseRecordingLocks(tabId);
     broadcastRecording({
       ...current,
       status: "error",
       interactionLockActive: false,
+      keyboardLockActive: false,
       terminationReason: reason,
       lastError: error.message
     });
@@ -246,6 +307,7 @@ chrome.tabs?.onRemoved?.addListener((tabId) => {
     pendingRecordingStart.cancelReason = "标签页已关闭，已取消录制启动";
   }
   if (interactionLockTabId === tabId) interactionLockTabId = null;
+  if (keyboardLockTabId === tabId) keyboardLockTabId = null;
 });
 
 function addUnique(list, value, limit = 300) {
@@ -449,7 +511,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   (async () => {
     if (message.target === "background" && message.type === "OFFSCREEN_RECORDING_STATE") {
       if (message.state?.tabId && !isRecordingActive(message.state)) {
-        await releaseInteractionLock(message.state.tabId);
+        await releaseRecordingLocks(message.state.tabId);
       }
       broadcastRecording(message.state);
       respond({ ok: true });
@@ -550,6 +612,55 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       return;
     }
 
+    if (message.type === "SET_RECORDING_KEYBOARD_LOCK") {
+      const recordingState = await getRecordingState();
+      if (recordingState.status !== "recording" || !recordingState.tabId) {
+        throw new Error("只有正在录制时才能切换键盘隔离");
+      }
+
+      const enabled = message.enabled === true;
+      const tabId = recordingState.tabId;
+      if (enabled) {
+        try {
+          await injectKeyboardLock(tabId);
+          keyboardLockTabId = tabId;
+          const result = await messageOffscreen("OFFSCREEN_SET_KEYBOARD_LOCK", {
+            requested: true,
+            active: true,
+            error: null
+          });
+          if (!result?.ok) throw new Error(result?.error || "无法更新键盘隔离状态");
+          broadcastRecording(result.state);
+          respond({ ok: true, state: lastRecordingState });
+        } catch (error) {
+          await releaseKeyboardLock(tabId);
+          const result = await messageOffscreen("OFFSCREEN_SET_KEYBOARD_LOCK", {
+            requested: false,
+            active: false,
+            error: error.message
+          }).catch(() => null);
+          if (result?.state) broadcastRecording(result.state);
+          respond({ ok: false, error: error.message, state: lastRecordingState });
+        }
+        return;
+      }
+
+      const released = await releaseKeyboardLock(tabId);
+      const result = await messageOffscreen("OFFSCREEN_SET_KEYBOARD_LOCK", {
+        requested: false,
+        active: false,
+        error: released.ok ? null : released.error
+      });
+      if (!result?.ok) throw new Error(result?.error || "无法更新键盘隔离状态");
+      broadcastRecording(result.state);
+      respond({
+        ok: released.ok,
+        error: released.error,
+        state: lastRecordingState
+      });
+      return;
+    }
+
     if (message.type === "START_TAB_RECORDING") {
       const tabId = message.tabId;
       if (!tabId) throw new Error("没有找到活动标签页");
@@ -567,8 +678,10 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       }
 
       const interactionLockRequested = message.interactionLockEnabled === true;
+      const keyboardLockRequested = message.keyboardLockEnabled === true;
       const startAttempt = { tabId, cancelled: false, cancelReason: null };
       let interactionLockFailure = null;
+      let keyboardLockFailure = null;
       pendingRecordingStart = startAttempt;
       try {
         await ensureOffscreenDocument();
@@ -595,6 +708,9 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
           interactionLockRequested,
           interactionLockActive: false,
           interactionLockError: null,
+          keyboardLockRequested,
+          keyboardLockActive: false,
+          keyboardLockError: null,
           terminationReason: null
         };
         broadcastRecording(lastRecordingState);
@@ -614,6 +730,21 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
           if (startAttempt.cancelled) throw new Error(startAttempt.cancelReason || "录制启动已取消");
         }
 
+        if (keyboardLockRequested) {
+          try {
+            await injectKeyboardLock(tabId);
+          } catch (error) {
+            keyboardLockFailure = error.message;
+            throw error;
+          }
+          keyboardLockTabId = tabId;
+          broadcastRecording({
+            ...lastRecordingState,
+            keyboardLockActive: true
+          });
+          if (startAttempt.cancelled) throw new Error(startAttempt.cancelReason || "录制启动已取消");
+        }
+
         const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
         if (startAttempt.cancelled) throw new Error(startAttempt.cancelReason || "录制启动已取消");
         const result = await messageOffscreen("OFFSCREEN_START_RECORDING", {
@@ -621,7 +752,9 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
           tabId,
           mimeType: selectedMimeType,
           interactionLockRequested,
-          interactionLockActive: interactionLockRequested
+          interactionLockActive: interactionLockRequested,
+          keyboardLockRequested,
+          keyboardLockActive: keyboardLockRequested
         });
         if (!result?.ok) throw new Error(result?.error || "无法开始录制当前标签页");
         if (startAttempt.cancelled) {
@@ -635,7 +768,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         respond({ ok: true, state: lastRecordingState });
       } catch (error) {
         pendingRecordingStart = null;
-        await releaseInteractionLock(tabId);
+        await releaseRecordingLocks(tabId);
         lastRecordingState = {
           ...lastRecordingState,
           status: "error",
@@ -643,6 +776,8 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
           bytes: 0,
           interactionLockActive: false,
           interactionLockError: interactionLockFailure,
+          keyboardLockActive: false,
+          keyboardLockError: keyboardLockFailure,
           lastError: error.message
         };
         broadcastRecording(lastRecordingState);
@@ -653,13 +788,13 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
 
     if (message.type === "STOP_TAB_RECORDING") {
       if (!(await hasOffscreenDocument())) {
-        await releaseInteractionLock(lastRecordingState.tabId);
+        await releaseRecordingLocks(lastRecordingState.tabId);
         throw new Error("当前没有标签页录制会话");
       }
       const recordingState = await getRecordingState();
       const result = await messageOffscreen("OFFSCREEN_STOP_RECORDING");
       if (!result?.ok) throw new Error(result?.error || "无法停止标签页录制");
-      await releaseInteractionLock(recordingState.tabId || result.state?.tabId);
+      await releaseRecordingLocks(recordingState.tabId || result.state?.tabId);
       broadcastRecording(result.state);
       respond({ ok: true, state: lastRecordingState });
       return;

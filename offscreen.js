@@ -47,6 +47,9 @@ function idleState() {
     interactionLockRequested: false,
     interactionLockActive: false,
     interactionLockError: null,
+    keyboardLockRequested: false,
+    keyboardLockActive: false,
+    keyboardLockError: null,
     terminationReason: null
   };
 }
@@ -234,12 +237,14 @@ function releaseMedia() {
   pendingChunks = 0;
   state.pendingBytes = 0;
   state.interactionLockActive = false;
+  state.keyboardLockActive = false;
 }
 
 async function preservePartial(error) {
   state.status = "error";
   state.lastError = error?.message || String(error);
   state.interactionLockActive = false;
+  state.keyboardLockActive = false;
   state.durationMs = state.startedAt ? Date.now() - state.startedAt : state.durationMs;
 
   try {
@@ -284,6 +289,7 @@ async function fail(error) {
     state.status = "error";
     state.lastError = error?.message || String(error);
     state.interactionLockActive = false;
+    state.keyboardLockActive = false;
     releaseMedia();
     broadcast();
     return;
@@ -292,6 +298,7 @@ async function fail(error) {
     state.status = "error";
     state.lastError = error?.message || String(error);
     state.interactionLockActive = false;
+    state.keyboardLockActive = false;
     releaseMedia();
     broadcast();
     return;
@@ -424,6 +431,7 @@ async function stopRecording(reason = null) {
   stopping = true;
   state.status = "stopping";
   state.interactionLockActive = false;
+  state.keyboardLockActive = false;
   if (reason) state.terminationReason = reason;
   state.durationMs = state.startedAt ? Date.now() - state.startedAt : state.durationMs;
   broadcast();
@@ -436,6 +444,15 @@ function setInteractionLockState({ requested, active, error }) {
   state.interactionLockRequested = Boolean(requested);
   state.interactionLockActive = Boolean(active);
   state.interactionLockError = error || null;
+  broadcast();
+  return publicState();
+}
+
+function setKeyboardLockState({ requested, active, error }) {
+  if (state.status !== "recording") throw new Error("当前没有正在进行的录制");
+  state.keyboardLockRequested = Boolean(requested);
+  state.keyboardLockActive = Boolean(active);
+  state.keyboardLockError = error || null;
   broadcast();
   return publicState();
 }
@@ -456,7 +473,9 @@ async function startRecording(streamId, tabId, interactionDetails = {}) {
     startedAt: Date.now(),
     mimeType,
     interactionLockRequested: Boolean(interactionDetails.requested),
-    interactionLockActive: Boolean(interactionDetails.active)
+    interactionLockActive: Boolean(interactionDetails.active),
+    keyboardLockRequested: Boolean(interactionDetails.keyboardRequested),
+    keyboardLockActive: Boolean(interactionDetails.keyboardActive)
   };
   state.recoveryAvailable = Boolean(recovery);
   state.recoveryBytes = recovery?.bytes || 0;
@@ -627,6 +646,8 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         state: await startRecording(message.streamId, message.tabId, {
           requested: message.interactionLockRequested,
           active: message.interactionLockActive,
+          keyboardRequested: message.keyboardLockRequested,
+          keyboardActive: message.keyboardLockActive,
           mimeType: message.mimeType
         })
       });
@@ -640,6 +661,17 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       respond({
         ok: true,
         state: setInteractionLockState({
+          requested: message.requested,
+          active: message.active,
+          error: message.error
+        })
+      });
+      return;
+    }
+    if (message.type === "OFFSCREEN_SET_KEYBOARD_LOCK") {
+      respond({
+        ok: true,
+        state: setKeyboardLockState({
           requested: message.requested,
           active: message.active,
           error: message.error

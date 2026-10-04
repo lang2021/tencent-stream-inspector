@@ -70,10 +70,18 @@ function renderRecording(state) {
   const active = ["starting", "recording", "stopping", "saving"].includes(status);
   const otherTab = Boolean(recordingState.tabId && activeTabId && recordingState.tabId !== activeTabId);
   const lockEnabled = Boolean(recordingState.interactionLockActive);
+  const keyboardLockEnabled = Boolean(recordingState.keyboardLockActive);
+  const isolationLabel = lockEnabled && keyboardLockEnabled
+    ? " · 鼠标和键盘已隔离"
+    : lockEnabled
+      ? " · 鼠标已隔离"
+      : keyboardLockEnabled
+        ? " · 键盘已隔离"
+        : "";
   const format = recordingFormat(recordingState);
   $("recordingDot").className = `status-dot ${status === "recording" ? "recording" : active ? "warn" : ""}`;
   $("recordingStatusText").textContent = status === "starting" ? "正在连接当前标签页" :
-    status === "recording" ? `${otherTab ? "正在录制另一个标签页" : "正在录制当前标签页"}${lockEnabled ? " · 鼠标已隔离" : ""}` :
+    status === "recording" ? `${otherTab ? "正在录制另一个标签页" : "正在录制当前标签页"}${isolationLabel}` :
     status === "stopping" ? "正在结束录制" :
     status === "saving" ? `正在保存 ${format.name}` :
     status === "saved" ? "录制已保存到下载目录" :
@@ -87,11 +95,13 @@ function renderRecording(state) {
   $("recoverRecordingButton").hidden = !recordingState.recoveryAvailable || active;
   $("recoverRecordingButton").disabled = active;
   $("startButton").disabled = ["running", "attaching"].includes(currentState?.status) || active;
-  const recordingError = recordingState.lastError || recordingState.interactionLockError || "";
+  const recordingError = recordingState.lastError || recordingState.interactionLockError || recordingState.keyboardLockError || "";
   $("recordingErrorText").hidden = !recordingError;
   $("recordingErrorText").textContent = recordingError;
   $("interactionLockCheckbox").checked = status === "recording" || status === "starting" ? lockEnabled : false;
   $("interactionLockCheckbox").disabled = ["starting", "stopping", "saving"].includes(status);
+  $("keyboardLockCheckbox").checked = status === "recording" || status === "starting" ? keyboardLockEnabled : false;
+  $("keyboardLockCheckbox").disabled = ["starting", "stopping", "saving"].includes(status);
   updateRecordingMetrics();
 
   clearInterval(recordingClock);
@@ -134,6 +144,7 @@ $("saveButton").addEventListener("click", async () => {
 
 $("startRecordingButton").addEventListener("click", async () => {
   const interactionLockEnabled = $("interactionLockCheckbox").checked;
+  const keyboardLockEnabled = $("keyboardLockCheckbox").checked;
   renderRecording({
     status: "starting",
     tabId: activeTabId,
@@ -141,11 +152,29 @@ $("startRecordingButton").addEventListener("click", async () => {
     bytes: 0,
     durationMs: 0,
     interactionLockRequested: interactionLockEnabled,
-    interactionLockActive: interactionLockEnabled
+    interactionLockActive: interactionLockEnabled,
+    keyboardLockRequested: keyboardLockEnabled,
+    keyboardLockActive: keyboardLockEnabled
   });
-  const result = await send("START_TAB_RECORDING", { interactionLockEnabled });
+  const result = await send("START_TAB_RECORDING", { interactionLockEnabled, keyboardLockEnabled });
   if (!result?.ok) {
     renderRecording({ status: "error", tabId: activeTabId, bytes: 0, durationMs: 0, lastError: result?.error || "无法开始录制" });
+    return;
+  }
+  renderRecording(result.state);
+});
+
+$("keyboardLockCheckbox").addEventListener("change", async () => {
+  if (recordingState?.status !== "recording") return;
+  const checkbox = $("keyboardLockCheckbox");
+  const enabled = checkbox.checked;
+  checkbox.disabled = true;
+  const result = await send("SET_RECORDING_KEYBOARD_LOCK", { enabled });
+  if (!result?.ok) {
+    renderRecording({
+      ...(result?.state || recordingState || {}),
+      keyboardLockError: result?.error || "无法切换键盘隔离"
+    });
     return;
   }
   renderRecording(result.state);

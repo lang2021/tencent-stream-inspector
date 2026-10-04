@@ -55,8 +55,14 @@
         </div>
 
         <label class="record-option" for="interactionLockCheckbox">
-          <span class="record-option-copy"><strong>鼠标隔离</strong><small>录制前或录制中均可切换；键盘仍可使用</small></span>
+          <span class="record-option-copy"><strong>鼠标隔离</strong><small>阻止指针、点击、滚轮和触摸影响页面</small></span>
           <input id="interactionLockCheckbox" class="switch-input" type="checkbox" />
+          <span class="switch-track" aria-hidden="true"></span>
+        </label>
+
+        <label class="record-option" for="keyboardLockCheckbox">
+          <span class="record-option-copy"><strong>键盘隔离</strong><small>阻止空格、方向键、Esc 和文字输入影响页面</small></span>
+          <input id="keyboardLockCheckbox" class="switch-input" type="checkbox" />
           <span class="switch-track" aria-hidden="true"></span>
         </label>
 
