@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Authorized Stream Inspector",
+  "version": "0.5.1",
+  "minimum_chrome_version": "116",
+  "description": "Capture authorized media response bytes or manually record the current tab.",
+  "permissions": [
+    "activeTab",
+    "debugger",
+    "downloads",
+    "offscreen",
+    "tabCapture",
+    "storage",
+    "unlimitedStorage"
+  ],
+  "action": {
+    "default_title": "Authorized Stream Inspector",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}

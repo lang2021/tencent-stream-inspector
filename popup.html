@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Stream Inspector</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="header">
+        <div>
+          <p class="eyebrow">AUTHORIZED MEDIA TOOL</p>
+          <h1>Stream Inspector</h1>
+        </div>
+      </header>
+
+      <section class="tool-section" aria-labelledby="dataCaptureTitle">
+        <div class="section-heading">
+          <h2 id="dataCaptureTitle">媒体数据捕获</h2>
+          <span id="statusDot" class="status-dot"></span>
+        </div>
+
+        <p id="statusText" class="status-text">等待开始捕获</p>
+
+        <div class="metrics" aria-label="捕获状态">
+          <div class="metric"><span>已获取</span><strong id="captureCount">0 份</strong></div>
+          <div class="metric"><span>数据量</span><strong id="captureBytes">0 B</strong></div>
+        </div>
+
+        <div class="actions">
+          <button id="startButton" class="primary">开始捕获</button>
+          <button id="stopButton" class="secondary" disabled>停止</button>
+        </div>
+
+        <div class="save-actions">
+          <button id="saveButton" class="download" disabled>保存内容</button>
+        </div>
+        <p class="notice">只保存实际获取的数据，不保存清单，也不会根据 URL 重新下载。</p>
+        <p id="errorText" class="error" hidden></p>
+      </section>
+
+      <section class="tool-section recording-section" aria-labelledby="tabRecordingTitle">
+        <div class="section-heading">
+          <h2 id="tabRecordingTitle">当前标签页录屏</h2>
+          <span id="recordingDot" class="status-dot"></span>
+        </div>
+
+        <p id="recordingStatusText" class="status-text">等待手动开始</p>
+
+        <div class="metrics" aria-label="录屏状态">
+          <div class="metric"><span>录制时长</span><strong id="recordingDuration">00:00</strong></div>
+          <div class="metric"><span>已录数据</span><strong id="recordingBytes">0 B</strong></div>
+        </div>
+
+        <div class="record-actions">
+          <button id="startRecordingButton" class="record">开始录制当前标签页</button>
+          <button id="stopRecordingButton" class="secondary" disabled>停止并保存</button>
+        </div>
+
+        <div class="recovery-actions">
+          <button id="recoverRecordingButton" class="download" hidden>导出未完成录像</button>
+        </div>
+
+        <p class="notice">只录当前标签页的可见页面和该标签页声音；不录桌面、其他窗口或浏览器工具栏。受保护内容可能黑屏或拒绝播放。</p>
+        <p id="recordingErrorText" class="error" hidden></p>
+      </section>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

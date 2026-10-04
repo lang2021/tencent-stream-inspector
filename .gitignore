@@ -1,0 +1,10 @@
+.DS_Store
+*.mp4
+*.webm
+*.mkv
+*.mov
+*.ts
+*.m4s
+*.part
+coverage/
+
