@@ -8,8 +8,13 @@ const MAX_TOTAL_BYTES = 128 * 1024 * 1024;
 const OFFSCREEN_DOCUMENT_URL = "offscreen.html";
 const DOWNLOAD_KEY_PREFIX = "authorizedTabRecordingDownload:";
 const RECOVERY_KEY = "authorizedTabRecordingRecovery";
+const INTERACTION_LOCK_SCRIPT = "interaction-lock.js";
+const INTERACTION_LOCK_SETTLE_MS = 2_000;
+const ACTIVE_RECORDING_STATUSES = new Set(["starting", "recording", "stopping", "saving"]);
 
 let creatingOffscreenDocument = null;
+let interactionLockTabId = null;
+let pendingRecordingStart = null;
 let lastRecordingState = {
   status: "idle",
   tabId: null,
@@ -26,7 +31,12 @@ let lastRecordingState = {
   recoveryAvailable: false,
   recoveryBytes: 0,
   recoveryStartedAt: null,
-  lastError: null
+  lastError: null,
+  interactionLockRequested: false,
+  interactionLockActive: false,
+  lockSettlesAt: null,
+  interactionLockError: null,
+  terminationReason: null
 };
 
 const send = (tabId, method, params = {}) =>
@@ -46,9 +56,22 @@ function broadcast(tabId) {
   chrome.runtime.sendMessage({ type: "STATE", state }).catch(() => {});
 }
 
+function normalizeRecordingState(state) {
+  return {
+    ...state,
+    interactionLockRequested: Boolean(state?.interactionLockRequested),
+    interactionLockActive: Boolean(
+      state?.interactionLockRequested &&
+      interactionLockTabId === state?.tabId &&
+      ACTIVE_RECORDING_STATUSES.has(state?.status)
+    )
+  };
+}
+
 function broadcastRecording(state) {
-  lastRecordingState = state;
-  chrome.runtime.sendMessage({ type: "RECORDING_STATE", state }).catch(() => {});
+  const nextState = normalizeRecordingState(state);
+  lastRecordingState = nextState;
+  chrome.runtime.sendMessage({ type: "RECORDING_STATE", state: nextState }).catch(() => {});
 }
 
 async function hasOffscreenDocument() {
@@ -77,6 +100,46 @@ async function messageOffscreen(type, details = {}) {
   return chrome.runtime.sendMessage({ target: "offscreen", type, ...details });
 }
 
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function injectInteractionLock(tabId) {
+  if (!chrome.scripting?.executeScript) {
+    throw new Error("当前 Chrome 不支持脚本注入，无法启用鼠标隔离");
+  }
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: [INTERACTION_LOCK_SCRIPT]
+  });
+  const [confirmation] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => Boolean(globalThis.__authorizedStreamInspectorInteractionLock?.isActive?.())
+  });
+  if (!confirmation?.result) throw new Error("无法确认鼠标隔离已启用");
+}
+
+async function releaseInteractionLock(tabId) {
+  if (!tabId || interactionLockTabId !== tabId) return;
+  if (!chrome.scripting?.executeScript) {
+    interactionLockTabId = null;
+    return;
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => globalThis.__authorizedStreamInspectorInteractionLock?.deactivate?.() || { active: false }
+    });
+  } catch {
+    // A closed or navigated tab no longer needs an in-page unlock.
+  }
+  if (interactionLockTabId === tabId) interactionLockTabId = null;
+}
+
+function isRecordingActive(state) {
+  return ACTIVE_RECORDING_STATUSES.has(state?.status);
+}
+
 async function getRecordingState() {
   if (!(await hasOffscreenDocument())) {
     try {
@@ -87,7 +150,7 @@ async function getRecordingState() {
   }
   try {
     const result = await messageOffscreen("OFFSCREEN_GET_STATE");
-    if (result?.state) lastRecordingState = result.state;
+    if (result?.state) lastRecordingState = normalizeRecordingState(result.state);
   } catch {
     // Fall back to the most recent state cached by the service worker.
   }
@@ -133,6 +196,58 @@ chrome.downloads.onChanged.addListener((delta) => {
   if (delta.state?.current === "complete" || delta.error?.current) {
     finishRecordingDownload(delta.id, delta).catch(() => {});
   }
+});
+
+async function stopRecordingForNavigation(tabId) {
+  const pending = pendingRecordingStart;
+  if (pending?.tabId === tabId) {
+    pending.cancelled = true;
+    pending.cancelReason = "页面发生导航，已取消录制启动";
+    await releaseInteractionLock(tabId);
+    if (lastRecordingState.tabId === tabId && lastRecordingState.status === "starting") {
+      broadcastRecording({
+        ...lastRecordingState,
+        status: "error",
+        interactionLockActive: false,
+        interactionLockError: pending.cancelReason,
+        lastError: pending.cancelReason
+      });
+    }
+    return;
+  }
+
+  const current = lastRecordingState;
+  if (current.tabId !== tabId || !current.interactionLockRequested || !isRecordingActive(current)) return;
+
+  const reason = "页面发生导航，已停止录制以保持鼠标隔离";
+  try {
+    const result = await messageOffscreen("OFFSCREEN_STOP_RECORDING", { reason });
+    await releaseInteractionLock(tabId);
+    if (!result?.ok) throw new Error(result?.error || "页面导航时无法停止录制");
+    broadcastRecording({ ...result.state, terminationReason: reason });
+  } catch (error) {
+    await releaseInteractionLock(tabId);
+    broadcastRecording({
+      ...current,
+      status: "error",
+      interactionLockActive: false,
+      terminationReason: reason,
+      lastError: error.message
+    });
+  }
+}
+
+chrome.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
+  if (changeInfo.status !== "loading") return;
+  stopRecordingForNavigation(tabId).catch(() => {});
+});
+
+chrome.tabs?.onRemoved?.addListener((tabId) => {
+  if (pendingRecordingStart?.tabId === tabId) {
+    pendingRecordingStart.cancelled = true;
+    pendingRecordingStart.cancelReason = "标签页已关闭，已取消录制启动";
+  }
+  if (interactionLockTabId === tabId) interactionLockTabId = null;
 });
 
 function addUnique(list, value, limit = 300) {
@@ -335,6 +450,9 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message.target === "offscreen") return false;
   (async () => {
     if (message.target === "background" && message.type === "OFFSCREEN_RECORDING_STATE") {
+      if (message.state?.tabId && !isRecordingActive(message.state)) {
+        await releaseInteractionLock(message.state.tabId);
+      }
       broadcastRecording(message.state);
       respond({ ok: true });
       return;
@@ -401,6 +519,9 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         throw new Error("已有标签页正在录制或保存");
       }
 
+      const interactionLockRequested = message.interactionLockEnabled === true;
+      const startAttempt = { tabId, cancelled: false, cancelReason: null };
+      pendingRecordingStart = startAttempt;
       try {
         await ensureOffscreenDocument();
         lastRecordingState = {
@@ -416,21 +537,56 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
           sourceFileName: null,
           downloadId: null,
           storageBackend: "opfs",
-          lastError: null
+          lastError: null,
+          interactionLockRequested,
+          interactionLockActive: false,
+          lockSettlesAt: interactionLockRequested ? Date.now() + INTERACTION_LOCK_SETTLE_MS : null,
+          interactionLockError: null,
+          terminationReason: null
         };
         broadcastRecording(lastRecordingState);
 
+        if (interactionLockRequested) {
+          await injectInteractionLock(tabId);
+          interactionLockTabId = tabId;
+          broadcastRecording({
+            ...lastRecordingState,
+            interactionLockActive: true,
+            lockSettlesAt: Date.now() + INTERACTION_LOCK_SETTLE_MS
+          });
+          await sleep(INTERACTION_LOCK_SETTLE_MS);
+          if (startAttempt.cancelled) throw new Error(startAttempt.cancelReason || "录制启动已取消");
+        }
+
         const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
-        const result = await messageOffscreen("OFFSCREEN_START_RECORDING", { streamId, tabId });
+        if (startAttempt.cancelled) throw new Error(startAttempt.cancelReason || "录制启动已取消");
+        const result = await messageOffscreen("OFFSCREEN_START_RECORDING", {
+          streamId,
+          tabId,
+          interactionLockRequested,
+          interactionLockActive: interactionLockRequested
+        });
         if (!result?.ok) throw new Error(result?.error || "无法开始录制当前标签页");
-        lastRecordingState = result.state;
-        respond({ ok: true, state: result.state });
+        if (startAttempt.cancelled) {
+          await messageOffscreen("OFFSCREEN_STOP_RECORDING", {
+            reason: startAttempt.cancelReason || "页面发生导航，已停止录制"
+          });
+          throw new Error(startAttempt.cancelReason || "录制启动已取消");
+        }
+        pendingRecordingStart = null;
+        broadcastRecording(result.state);
+        respond({ ok: true, state: lastRecordingState });
       } catch (error) {
+        pendingRecordingStart = null;
+        await releaseInteractionLock(tabId);
         lastRecordingState = {
           ...lastRecordingState,
           status: "error",
           durationMs: 0,
           bytes: 0,
+          interactionLockActive: false,
+          lockSettlesAt: null,
+          interactionLockError: interactionLockRequested ? error.message : null,
           lastError: error.message
         };
         broadcastRecording(lastRecordingState);
@@ -440,11 +596,16 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     }
 
     if (message.type === "STOP_TAB_RECORDING") {
-      if (!(await hasOffscreenDocument())) throw new Error("当前没有标签页录制会话");
+      if (!(await hasOffscreenDocument())) {
+        await releaseInteractionLock(lastRecordingState.tabId);
+        throw new Error("当前没有标签页录制会话");
+      }
+      const recordingState = await getRecordingState();
       const result = await messageOffscreen("OFFSCREEN_STOP_RECORDING");
       if (!result?.ok) throw new Error(result?.error || "无法停止标签页录制");
-      lastRecordingState = result.state;
-      respond({ ok: true, state: result.state });
+      await releaseInteractionLock(recordingState.tabId || result.state?.tabId);
+      broadcastRecording(result.state);
+      respond({ ok: true, state: lastRecordingState });
       return;
     }
 

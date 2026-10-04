@@ -53,6 +53,11 @@
           <div class="metric"><span>已录数据</span><strong id="recordingBytes">0 B</strong></div>
         </div>
 
+        <label class="record-option" for="interactionLockCheckbox">
+          <input id="interactionLockCheckbox" type="checkbox" />
+          <span><strong>录制时隔离鼠标</strong><small>阻止鼠标触发页面控件；启用后等待 2 秒</small></span>
+        </label>
+
         <div class="record-actions">
           <button id="startRecordingButton" class="record">开始录制当前标签页</button>
           <button id="stopRecordingButton" class="secondary" disabled>停止并保存</button>

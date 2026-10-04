@@ -37,7 +37,12 @@ function idleState() {
     recoveryAvailable: false,
     recoveryBytes: 0,
     recoveryStartedAt: null,
-    lastError: null
+    lastError: null,
+    interactionLockRequested: false,
+    interactionLockActive: false,
+    lockSettlesAt: null,
+    interactionLockError: null,
+    terminationReason: null
   };
 }
 
@@ -202,11 +207,13 @@ function releaseMedia() {
   pendingBytes = 0;
   pendingChunks = 0;
   state.pendingBytes = 0;
+  state.interactionLockActive = false;
 }
 
 async function preservePartial(error) {
   state.status = "error";
   state.lastError = error?.message || String(error);
+  state.interactionLockActive = false;
   state.durationMs = state.startedAt ? Date.now() - state.startedAt : state.durationMs;
 
   try {
@@ -239,6 +246,18 @@ async function fail(error) {
       recorder.stop();
       return;
     } catch {}
+  }
+  if (state.status === "starting" && (!recorder || recorder.state === "inactive") && writerFileName) {
+    try { await writeChain; } catch {}
+    try { await writerRequest("close"); } catch {}
+    try { await writerRequest("delete", { fileName: writerFileName }); } catch {}
+    writerFileName = null;
+    state.status = "error";
+    state.lastError = error?.message || String(error);
+    state.interactionLockActive = false;
+    releaseMedia();
+    broadcast();
+    return;
   }
   await preservePartial(error);
 }
@@ -363,24 +382,34 @@ async function finalizeRecording() {
   broadcast();
 }
 
-async function stopRecording() {
+async function stopRecording(reason = null) {
   if (!recorder || recorder.state === "inactive" || stopping) return publicState();
   stopping = true;
   state.status = "stopping";
+  state.interactionLockActive = false;
+  if (reason) state.terminationReason = reason;
   state.durationMs = state.startedAt ? Date.now() - state.startedAt : state.durationMs;
   broadcast();
   recorder.stop();
   return publicState();
 }
 
-async function startRecording(streamId, tabId) {
+async function startRecording(streamId, tabId, interactionDetails = {}) {
   if (recorder && recorder.state !== "inactive") throw new Error("已有标签页正在录制");
 
   await refreshRecoveryState();
   releaseMedia();
   storageFailure = null;
   writeChain = Promise.resolve();
-  state = { ...idleState(), status: "starting", tabId, startedAt: Date.now() };
+  state = {
+    ...idleState(),
+    status: "starting",
+    tabId,
+    startedAt: Date.now(),
+    interactionLockRequested: Boolean(interactionDetails.requested),
+    interactionLockActive: Boolean(interactionDetails.active),
+    lockSettlesAt: null
+  };
   state.recoveryAvailable = Boolean(recovery);
   state.recoveryBytes = recovery?.bytes || 0;
   state.recoveryStartedAt = recovery?.startedAt || null;
@@ -536,11 +565,17 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       return;
     }
     if (message.type === "OFFSCREEN_START_RECORDING") {
-      respond({ ok: true, state: await startRecording(message.streamId, message.tabId) });
+      respond({
+        ok: true,
+        state: await startRecording(message.streamId, message.tabId, {
+          requested: message.interactionLockRequested,
+          active: message.interactionLockActive
+        })
+      });
       return;
     }
     if (message.type === "OFFSCREEN_STOP_RECORDING") {
-      respond({ ok: true, state: await stopRecording() });
+      respond({ ok: true, state: await stopRecording(message.reason || null) });
       return;
     }
     if (message.type === "OFFSCREEN_EXPORT_RECOVERY") {
