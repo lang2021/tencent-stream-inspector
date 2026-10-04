@@ -2,6 +2,11 @@ const WRITE_INTERVAL_MS = 5_000;
 const SOFT_PENDING_BYTES = 64 * 1024 * 1024;
 const SOFT_PENDING_CHUNKS = 16;
 const HARD_PENDING_BYTES = 256 * 1024 * 1024;
+const MP4_MIME_CANDIDATES = [
+  "video/mp4;codecs=avc1.640028,mp4a.40.2",
+  "video/mp4;codecs=avc1,mp4a.40.2"
+];
+const DEFAULT_MP4_MIME_TYPE = "video/mp4";
 let recorder = null;
 let capturedStream = null;
 let audioContext = null;
@@ -37,6 +42,7 @@ function idleState() {
     recoveryAvailable: false,
     recoveryBytes: 0,
     recoveryStartedAt: null,
+    recoveryMimeType: null,
     lastError: null,
     interactionLockRequested: false,
     interactionLockActive: false,
@@ -51,7 +57,8 @@ function publicState() {
     ...state,
     recoveryAvailable: !downloadPending && Boolean(recovery),
     recoveryBytes: !downloadPending ? (recovery?.bytes || 0) : 0,
-    recoveryStartedAt: !downloadPending ? (recovery?.startedAt || null) : null
+    recoveryStartedAt: !downloadPending ? (recovery?.startedAt || null) : null,
+    recoveryMimeType: !downloadPending ? (recovery?.mimeType || null) : null
   };
 }
 
@@ -63,24 +70,38 @@ function broadcast() {
   }).catch(() => {});
 }
 
-function supportedMimeType() {
-  const candidates = [
-    "video/webm;codecs=vp9,opus",
-    "video/webm;codecs=vp8,opus",
-    "video/webm"
-  ];
-  return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) || "";
+function supportedMp4MimeType() {
+  if (typeof MediaRecorder === "undefined" || typeof MediaRecorder.isTypeSupported !== "function") {
+    return null;
+  }
+  return MP4_MIME_CANDIDATES.find((candidate) => MediaRecorder.isTypeSupported(candidate)) || null;
 }
 
-function recordingFilename(startedAt) {
+function recordingCapabilities() {
+  const mimeType = supportedMp4MimeType();
+  return {
+    mp4Supported: Boolean(mimeType),
+    mimeType
+  };
+}
+
+function mimeTypeForFileName(fileName) {
+  return fileName?.toLowerCase().endsWith(".webm") ? "video/webm" : DEFAULT_MP4_MIME_TYPE;
+}
+
+function extensionForMimeType(mimeType) {
+  return /^video\/webm(?:;|$)/i.test(mimeType || "") ? "webm" : "mp4";
+}
+
+function recordingFilename(startedAt, mimeType = DEFAULT_MP4_MIME_TYPE) {
   const stamp = new Date(startedAt).toISOString().replace(/[:.]/g, "-");
-  return `authorized-tab-recording-${stamp}.webm`;
+  return `authorized-tab-recording-${stamp}.${extensionForMimeType(mimeType)}`;
 }
 
-function recordingFileName(startedAt) {
+function recordingFileName(startedAt, mimeType = DEFAULT_MP4_MIME_TYPE) {
   const stamp = new Date(startedAt).toISOString().replace(/[:.]/g, "-");
   const suffix = Math.random().toString(16).slice(2, 8);
-  return `authorized-tab-recording-${stamp}-${suffix}.webm`;
+  return `authorized-tab-recording-${stamp}-${suffix}.${extensionForMimeType(mimeType)}`;
 }
 
 function writerRequest(type, details = {}, transfer = []) {
@@ -175,12 +196,17 @@ async function loadRecovery() {
     return null;
   }
 
+  const matchingMeta = meta?.fileName === candidate.fileName ? meta : null;
+  const recoveredMimeType = matchingMeta?.mimeType || mimeTypeForFileName(candidate.fileName);
   recovery = {
     fileName: candidate.fileName,
     bytes: candidate.byteSize,
-    startedAt: meta?.startedAt || candidate.lastModified || Date.now(),
-    mimeType: meta?.mimeType || "video/webm",
-    filename: meta?.filename || recordingFilename(meta?.startedAt || candidate.lastModified || Date.now())
+    startedAt: matchingMeta?.startedAt || candidate.lastModified || Date.now(),
+    mimeType: recoveredMimeType,
+    filename: matchingMeta?.filename || recordingFilename(
+      matchingMeta?.startedAt || candidate.lastModified || Date.now(),
+      recoveredMimeType
+    )
   };
   await saveRecoveryMeta({ ...recovery, status: "recoverable" });
   return recovery;
@@ -191,6 +217,7 @@ async function refreshRecoveryState() {
   state.recoveryAvailable = Boolean(recovery);
   state.recoveryBytes = recovery?.bytes || 0;
   state.recoveryStartedAt = recovery?.startedAt || null;
+  state.recoveryMimeType = recovery?.mimeType || null;
 }
 
 function releaseMedia() {
@@ -228,8 +255,11 @@ async function preservePartial(error) {
       fileName: writerFileName,
       bytes: state.bytes,
       startedAt: state.startedAt || Date.now(),
-      mimeType: state.mimeType || "video/webm",
-      filename: state.filename || recordingFilename(state.startedAt || Date.now())
+      mimeType: state.mimeType || DEFAULT_MP4_MIME_TYPE,
+      filename: state.filename || recordingFilename(
+        state.startedAt || Date.now(),
+        state.mimeType || DEFAULT_MP4_MIME_TYPE
+      )
     };
     await saveRecoveryMeta({ ...recovery, status: "recoverable" });
   }
@@ -258,19 +288,27 @@ async function fail(error) {
     broadcast();
     return;
   }
+  if (state.status === "starting" && !writerFileName) {
+    state.status = "error";
+    state.lastError = error?.message || String(error);
+    state.interactionLockActive = false;
+    releaseMedia();
+    broadcast();
+    return;
+  }
   await preservePartial(error);
 }
 
 async function openRecordingFile() {
   const startedAt = state.startedAt || Date.now();
-  writerFileName = recordingFileName(startedAt);
+  writerFileName = recordingFileName(startedAt, state.mimeType);
   await writerRequest("open", { fileName: writerFileName });
   await saveRecoveryMeta({
     fileName: writerFileName,
     startedAt,
     bytes: 0,
-    mimeType: state.mimeType || "video/webm",
-    filename: recordingFilename(startedAt),
+    mimeType: state.mimeType || DEFAULT_MP4_MIME_TYPE,
+    filename: recordingFilename(startedAt, state.mimeType),
     status: "recording"
   });
 }
@@ -311,7 +349,7 @@ function enqueueChunk(blob) {
       startedAt: state.startedAt,
       bytes: state.bytes,
       mimeType: state.mimeType,
-      filename: state.filename || recordingFilename(state.startedAt),
+      filename: state.filename || recordingFilename(state.startedAt, state.mimeType),
       status: "recording"
     }).catch(() => {});
     maybeResumeAfterBackpressure();
@@ -345,7 +383,7 @@ async function finalizeRecording() {
     startedAt: state.startedAt,
     bytes: state.bytes,
     mimeType: state.mimeType,
-    filename: recordingFilename(state.startedAt || Date.now()),
+    filename: recordingFilename(state.startedAt || Date.now(), state.mimeType),
     status: "saving"
   });
   broadcast();
@@ -358,7 +396,7 @@ async function finalizeRecording() {
 
   const file = await getOpfsFile(writerFileName);
   if (!file.size) throw new Error("没有录到可保存的标签页画面或声音");
-  state.filename = recordingFilename(state.startedAt || Date.now());
+  state.filename = recordingFilename(state.startedAt || Date.now(), state.mimeType);
   state.sourceFileName = writerFileName;
   const objectUrl = URL.createObjectURL(file);
   objectUrls.set(writerFileName, objectUrl);
@@ -407,23 +445,28 @@ async function startRecording(streamId, tabId, interactionDetails = {}) {
 
   await refreshRecoveryState();
   releaseMedia();
+  writerFileName = null;
   storageFailure = null;
   writeChain = Promise.resolve();
+  const mimeType = interactionDetails.mimeType;
   state = {
     ...idleState(),
     status: "starting",
     tabId,
     startedAt: Date.now(),
+    mimeType,
     interactionLockRequested: Boolean(interactionDetails.requested),
     interactionLockActive: Boolean(interactionDetails.active)
   };
   state.recoveryAvailable = Boolean(recovery);
   state.recoveryBytes = recovery?.bytes || 0;
   state.recoveryStartedAt = recovery?.startedAt || null;
+  state.recoveryMimeType = recovery?.mimeType || null;
   broadcast();
 
-  const mimeType = supportedMimeType();
-  state.mimeType = mimeType || "video/webm";
+  if (!MP4_MIME_CANDIDATES.includes(mimeType) || !MediaRecorder.isTypeSupported(mimeType)) {
+    throw new Error("当前 Chrome 或系统不支持直接录制 H.264/AAC MP4");
+  }
   await openRecordingFile();
 
   capturedStream = await navigator.mediaDevices.getUserMedia({
@@ -457,7 +500,7 @@ async function startRecording(streamId, tabId, interactionDetails = {}) {
     audioBitsPerSecond: 128_000
   });
   stopping = false;
-  state.mimeType = recorder.mimeType || mimeType || "video/webm";
+  state.mimeType = recorder.mimeType || mimeType;
   state.startedAt = Date.now();
 
   recorder.addEventListener("dataavailable", (event) => {
@@ -480,7 +523,7 @@ async function startRecording(streamId, tabId, interactionDetails = {}) {
     startedAt: state.startedAt,
     bytes: 0,
     mimeType: state.mimeType,
-    filename: recordingFilename(state.startedAt),
+    filename: recordingFilename(state.startedAt, state.mimeType),
     status: "recording"
   });
   broadcast();
@@ -502,7 +545,8 @@ async function exportRecovery() {
     sourceFileName: recovery.fileName,
     recoveryAvailable: true,
     recoveryBytes: recovery.bytes,
-    recoveryStartedAt: recovery.startedAt
+    recoveryStartedAt: recovery.startedAt,
+    recoveryMimeType: recovery.mimeType
   };
   writerFileName = recovery.fileName;
   const file = await getOpfsFile(writerFileName);
@@ -538,18 +582,20 @@ async function cleanupDownloadedFile(fileName) {
   state.recoveryAvailable = Boolean(recovery);
   state.recoveryBytes = recovery?.bytes || 0;
   state.recoveryStartedAt = recovery?.startedAt || null;
+  state.recoveryMimeType = recovery?.mimeType || null;
   broadcast();
 }
 
 async function markDownloadFailed(fileName, message) {
   const meta = await readRecoveryMeta();
   if (meta?.fileName === fileName) {
+    const recoveredMimeType = meta.mimeType || mimeTypeForFileName(fileName);
     recovery = {
       fileName,
       bytes: meta.bytes || state.bytes,
       startedAt: meta.startedAt || Date.now(),
-      mimeType: meta.mimeType || "video/webm",
-      filename: meta.filename || recordingFilename(meta.startedAt || Date.now())
+      mimeType: recoveredMimeType,
+      filename: meta.filename || recordingFilename(meta.startedAt || Date.now(), recoveredMimeType)
     };
     await saveRecoveryMeta({ ...recovery, status: "recoverable" });
   }
@@ -571,12 +617,17 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       respond({ ok: true, state: publicState() });
       return;
     }
+    if (message.type === "OFFSCREEN_GET_RECORDING_CAPABILITIES") {
+      respond({ ok: true, capabilities: recordingCapabilities() });
+      return;
+    }
     if (message.type === "OFFSCREEN_START_RECORDING") {
       respond({
         ok: true,
         state: await startRecording(message.streamId, message.tabId, {
           requested: message.interactionLockRequested,
-          active: message.interactionLockActive
+          active: message.interactionLockActive,
+          mimeType: message.mimeType
         })
       });
       return;

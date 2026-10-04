@@ -30,6 +30,7 @@ let lastRecordingState = {
   recoveryAvailable: false,
   recoveryBytes: 0,
   recoveryStartedAt: null,
+  recoveryMimeType: null,
   lastError: null,
   interactionLockRequested: false,
   interactionLockActive: false,
@@ -567,9 +568,15 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
 
       const interactionLockRequested = message.interactionLockEnabled === true;
       const startAttempt = { tabId, cancelled: false, cancelReason: null };
+      let interactionLockFailure = null;
       pendingRecordingStart = startAttempt;
       try {
         await ensureOffscreenDocument();
+        const capabilityResult = await messageOffscreen("OFFSCREEN_GET_RECORDING_CAPABILITIES");
+        const selectedMimeType = capabilityResult?.capabilities?.mimeType;
+        if (!capabilityResult?.ok || !capabilityResult.capabilities?.mp4Supported || !selectedMimeType) {
+          throw new Error(capabilityResult?.error || "当前 Chrome 或系统不支持直接录制 H.264/AAC MP4");
+        }
         lastRecordingState = {
           ...lastRecordingState,
           status: "starting",
@@ -579,6 +586,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
           durationMs: 0,
           bytes: 0,
           pendingBytes: 0,
+          mimeType: selectedMimeType,
           filename: null,
           sourceFileName: null,
           downloadId: null,
@@ -592,7 +600,12 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         broadcastRecording(lastRecordingState);
 
         if (interactionLockRequested) {
-          await injectInteractionLock(tabId);
+          try {
+            await injectInteractionLock(tabId);
+          } catch (error) {
+            interactionLockFailure = error.message;
+            throw error;
+          }
           interactionLockTabId = tabId;
           broadcastRecording({
             ...lastRecordingState,
@@ -606,6 +619,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         const result = await messageOffscreen("OFFSCREEN_START_RECORDING", {
           streamId,
           tabId,
+          mimeType: selectedMimeType,
           interactionLockRequested,
           interactionLockActive: interactionLockRequested
         });
@@ -628,7 +642,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
           durationMs: 0,
           bytes: 0,
           interactionLockActive: false,
-          interactionLockError: interactionLockRequested ? error.message : null,
+          interactionLockError: interactionLockFailure,
           lastError: error.message
         };
         broadcastRecording(lastRecordingState);

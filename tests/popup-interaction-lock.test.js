@@ -16,3 +16,11 @@ test("mouse isolation is an opt-in, non-persisted popup setting", () => {
   assert.doesNotMatch(script, /2_000|2 秒/);
   assert.doesNotMatch(script, /chrome\.storage/);
 });
+
+test("popup reports MP4 recording and preserves the old WebM recovery label", () => {
+  assert.match(html, /id="recordingFormat"/);
+  assert.match(html, /MP4 · H\.264\/AAC/);
+  assert.match(script, /正在保存 \$\{format\.name\}/);
+  assert.match(script, /WebM · 旧恢复文件/);
+  assert.doesNotMatch(script, /正在保存 WebM/);
+});

@@ -52,22 +52,36 @@ function updateRecordingMetrics() {
   $("recordingBytes").textContent = formatBytes(recordingState.bytes || 0);
 }
 
+function recordingFormat(state) {
+  const active = ["starting", "recording", "stopping", "saving"].includes(state?.status);
+  const mimeType = !active && state?.recoveryAvailable
+    ? state.recoveryMimeType
+    : state?.mimeType;
+  const isWebm = /^video\/webm(?:;|$)/i.test(mimeType);
+  return {
+    name: isWebm ? "WebM" : "MP4",
+    label: isWebm ? "WebM · 旧恢复文件" : "MP4 · H.264/AAC"
+  };
+}
+
 function renderRecording(state) {
   recordingState = state || { status: "idle", bytes: 0, durationMs: 0 };
   const status = recordingState.status;
   const active = ["starting", "recording", "stopping", "saving"].includes(status);
   const otherTab = Boolean(recordingState.tabId && activeTabId && recordingState.tabId !== activeTabId);
   const lockEnabled = Boolean(recordingState.interactionLockActive);
+  const format = recordingFormat(recordingState);
   $("recordingDot").className = `status-dot ${status === "recording" ? "recording" : active ? "warn" : ""}`;
   $("recordingStatusText").textContent = status === "starting" ? "正在连接当前标签页" :
     status === "recording" ? `${otherTab ? "正在录制另一个标签页" : "正在录制当前标签页"}${lockEnabled ? " · 鼠标已隔离" : ""}` :
     status === "stopping" ? "正在结束录制" :
-    status === "saving" ? "正在保存 WebM" :
+    status === "saving" ? `正在保存 ${format.name}` :
     status === "saved" ? "录制已保存到下载目录" :
     status === "error" ? "录制失败" : "等待手动开始";
   if (recordingState.recoveryAvailable && !active) {
     $("recordingStatusText").textContent = "发现未完成录像，可导出已写入内容";
   }
+  $("recordingFormat").textContent = format.label;
   $("startRecordingButton").disabled = active || ["running", "attaching"].includes(currentState?.status);
   $("stopRecordingButton").disabled = status !== "recording";
   $("recoverRecordingButton").hidden = !recordingState.recoveryAvailable || active;

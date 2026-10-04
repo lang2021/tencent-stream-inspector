@@ -5,6 +5,7 @@ const vm = require("node:vm");
 
 const source = fs.readFileSync(path.join(__dirname, "..", "offscreen.js"), "utf8");
 let onRuntimeMessage = null;
+const supportedTypes = [];
 
 class FakeWorker {
   constructor() {
@@ -35,6 +36,12 @@ const context = {
   clearTimeout,
   queueMicrotask,
   Worker: FakeWorker,
+  MediaRecorder: {
+    isTypeSupported(type) {
+      supportedTypes.push(type);
+      return type === "video/mp4;codecs=avc1.640028,mp4a.40.2";
+    }
+  },
   URL: { createObjectURL: () => "blob:test", revokeObjectURL() {} },
   navigator: { storage: {} },
   chrome: {
@@ -68,6 +75,14 @@ function sendToOffscreen(message) {
     true,
     `offscreen state failed without chrome.storage: ${response.error}`
   );
+  const capabilities = await sendToOffscreen({
+    target: "offscreen",
+    type: "OFFSCREEN_GET_RECORDING_CAPABILITIES"
+  });
+  assert.equal(capabilities.ok, true);
+  assert.equal(capabilities.capabilities.mp4Supported, true);
+  assert.equal(capabilities.capabilities.mimeType, "video/mp4;codecs=avc1.640028,mp4a.40.2");
+  assert.deepEqual(supportedTypes, ["video/mp4;codecs=avc1.640028,mp4a.40.2"]);
   console.log("offscreen runtime-only context: PASS");
 })().catch((error) => {
   console.error(error.message);

@@ -1,4 +1,5 @@
 const FILE_PREFIX = "authorized-tab-recording-";
+const SUPPORTED_RECORDING_EXTENSIONS = [".mp4", ".webm"];
 
 let fileName = null;
 let syncHandle = null;
@@ -30,7 +31,8 @@ async function listFiles() {
   const directory = await getDirectory();
   const files = [];
   for await (const [name, handle] of directory.entries()) {
-    if (!name.startsWith(FILE_PREFIX) || !name.endsWith(".webm")) continue;
+    if (!name.startsWith(FILE_PREFIX) ||
+        !SUPPORTED_RECORDING_EXTENSIONS.some((extension) => name.endsWith(extension))) continue;
     try {
       const file = await handle.getFile();
       files.push({
@@ -40,7 +42,7 @@ async function listFiles() {
       });
     } catch {}
   }
-  return files.sort((a, b) => b.lastModified - a.lastModified);
+  return { files: files.sort((a, b) => b.lastModified - a.lastModified) };
 }
 
 async function openFile(nextFileName) {

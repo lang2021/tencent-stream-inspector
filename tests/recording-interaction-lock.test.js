@@ -7,12 +7,14 @@ const vm = require("node:vm");
 const source = fs.readFileSync(path.join(__dirname, "..", "background.js"), "utf8");
 
 function makeHarness() {
+  const selectedMp4MimeType = "video/mp4;codecs=avc1.640028,mp4a.40.2";
   const calls = [];
   const scheduled = [];
   const listeners = { message: null, updated: null, removed: null };
   let offscreenAvailable = false;
   let lockInjected = false;
   let injectionShouldFail = false;
+  let mp4Supported = true;
   let nextDownloadId = 1;
   let offscreenState = {
     status: "idle",
@@ -29,11 +31,22 @@ function makeHarness() {
       calls.push({ type: "runtime", message });
       if (message.target !== "offscreen") return Promise.resolve({ ok: true });
       if (message.type === "OFFSCREEN_GET_STATE") return Promise.resolve({ ok: true, state: offscreenState });
+      if (message.type === "OFFSCREEN_GET_RECORDING_CAPABILITIES") {
+        calls.push({ type: "capabilities" });
+        return Promise.resolve({
+          ok: true,
+          capabilities: {
+            mp4Supported,
+            mimeType: mp4Supported ? selectedMp4MimeType : null
+          }
+        });
+      }
       if (message.type === "OFFSCREEN_START_RECORDING") {
         offscreenState = {
           ...offscreenState,
           status: "recording",
           tabId: message.tabId,
+          mimeType: message.mimeType,
           interactionLockRequested: Boolean(message.interactionLockRequested),
           interactionLockActive: Boolean(message.interactionLockActive)
         };
@@ -129,6 +142,7 @@ function makeHarness() {
     scheduled,
     listeners,
     setInjectionFailure(value) { injectionShouldFail = value; },
+    setMp4Supported(value) { mp4Supported = value; },
     setIdle() {
       offscreenState = {
         ...offscreenState,
@@ -158,6 +172,13 @@ test("isolation starts immediately after injection and injection failure is fail
   assert.equal(ordinaryResult.ok, true);
   assert.equal(harness.calls.some((call) => call.type === "script"), false);
   assert.equal(harness.calls.some((call) => call.type === "capture"), true);
+  const ordinaryCapabilitiesIndex = harness.calls.findIndex((call) => call.type === "capabilities");
+  const ordinaryCaptureIndex = harness.calls.findIndex((call) => call.type === "capture");
+  assert.ok(ordinaryCapabilitiesIndex >= 0 && ordinaryCapabilitiesIndex < ordinaryCaptureIndex);
+  assert.equal(
+    harness.calls.find((call) => call.type === "offscreen-start").message.mimeType,
+    "video/mp4;codecs=avc1.640028,mp4a.40.2"
+  );
 
   const ordinaryStop = await harness.send({ type: "STOP_TAB_RECORDING", tabId: 7 });
   assert.equal(ordinaryStop.ok, true);
@@ -170,6 +191,8 @@ test("isolation starts immediately after injection and injection failure is fail
   assert.equal(isolatedResult.ok, true);
   assert.equal(harness.scheduled.some((item) => item.delay === 2_000), false);
   const captureIndex = harness.calls.findIndex((call) => call.type === "capture");
+  const capabilitiesIndex = harness.calls.findIndex((call) => call.type === "capabilities");
+  assert.ok(capabilitiesIndex < fileIndex);
   assert.ok(fileIndex < captureIndex);
 
   await harness.send({ type: "STOP_TAB_RECORDING", tabId: 7 });
@@ -179,6 +202,24 @@ test("isolation starts immediately after injection and injection failure is fail
   const failed = await harness.send({ type: "START_TAB_RECORDING", tabId: 7, interactionLockEnabled: true });
   assert.equal(failed.ok, false);
   assert.equal(harness.calls.some((call) => call.type === "capture"), false);
+});
+
+test("unsupported MP4 fails before mouse isolation and tab capture", async () => {
+  const harness = makeHarness();
+  harness.setMp4Supported(false);
+
+  const result = await harness.send({
+    type: "START_TAB_RECORDING",
+    tabId: 11,
+    interactionLockEnabled: true
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /不支持直接录制 H\.264\/AAC MP4/);
+  assert.equal(harness.calls.some((call) => call.type === "capabilities"), true);
+  assert.equal(harness.calls.some((call) => call.type === "script"), false);
+  assert.equal(harness.calls.some((call) => call.type === "capture"), false);
+  assert.equal(harness.calls.some((call) => call.type === "offscreen-start"), false);
 });
 
 test("mouse isolation can be enabled and disabled while recording", async () => {
