@@ -1,5 +1,17 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const fs = require("node:fs");
+const path = require("node:path");
+
+test("tab recording keeps its root runtime resource paths valid", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "features", "tab-recording", "background.js"), "utf8");
+  assert.match(source, /OFFSCREEN_DOCUMENT_URL = "offscreen\.html"/);
+  assert.match(source, /INTERACTION_LOCK_SCRIPT = "interaction-lock\.js"/);
+  assert.match(source, /KEYBOARD_LOCK_SCRIPT = "keyboard-lock\.js"/);
+  for (const file of ["offscreen.html", "interaction-lock.js", "keyboard-lock.js"]) {
+    assert.equal(fs.existsSync(path.join(__dirname, "..", file)), true, file);
+  }
+});
 
 test("media capture is dormant by default and does not register debugger listeners", async () => {
   let runtimeMessageListener = null;

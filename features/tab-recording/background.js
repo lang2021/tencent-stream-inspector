@@ -1,8 +1,8 @@
-const OFFSCREEN_DOCUMENT_URL = "features/tab-recording/offscreen.html";
+const OFFSCREEN_DOCUMENT_URL = "offscreen.html";
 const DOWNLOAD_KEY_PREFIX = "authorizedTabRecordingDownload:";
 const RECOVERY_KEY = "authorizedTabRecordingRecovery";
-const INTERACTION_LOCK_SCRIPT = "features/tab-recording/interaction-lock.js";
-const KEYBOARD_LOCK_SCRIPT = "features/tab-recording/keyboard-lock.js";
+const INTERACTION_LOCK_SCRIPT = "interaction-lock.js";
+const KEYBOARD_LOCK_SCRIPT = "keyboard-lock.js";
 const ACTIVE_RECORDING_STATUSES = new Set(["starting", "recording", "stopping", "saving"]);
 
 export function createTabRecordingModule(runtime) {
